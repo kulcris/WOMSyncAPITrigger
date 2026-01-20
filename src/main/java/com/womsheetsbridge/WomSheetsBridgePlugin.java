@@ -9,12 +9,15 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.Notifier;
 
-import okhttp3.*;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
-import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,18 +29,15 @@ import java.util.concurrent.Executors;
 )
 public class WomSheetsBridgePlugin extends Plugin
 {
-    private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-
-    // The WOM plugin’s button click generally surfaces as a menu option containing this text.
-    // (The official WOM RuneLite plugin adds a 'Sync WOM Group' button to clan settings.) :contentReference[oaicite:1]{index=1}
     private static final String SYNC_OPTION_TEXT = "Sync WOM Group";
 
     @Inject private WomSheetsBridgeConfig config;
     @Inject private Notifier notifier;
 
-    // RuneLite commonly uses OkHttp; we can create our own client safely.
-    private final OkHttpClient http = new OkHttpClient();
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
 
     @Provides
     WomSheetsBridgeConfig provideConfig(ConfigManager configManager)
@@ -60,14 +60,7 @@ public class WomSheetsBridgePlugin extends Plugin
         }
 
         final String option = event.getMenuOption();
-        if (option == null)
-        {
-            return;
-        }
-
-        // Be forgiving: different RL builds/plugins sometimes add color tags or prefixes.
-        // So we match "contains" not equals.
-        if (!option.contains(SYNC_OPTION_TEXT))
+        if (option == null || !option.contains(SYNC_OPTION_TEXT))
         {
             return;
         }
@@ -81,33 +74,34 @@ public class WomSheetsBridgePlugin extends Plugin
             return;
         }
 
-        // Fire request off-thread
         executor.submit(() -> triggerAppsScript(url, secret));
     }
 
     private void triggerAppsScript(String webAppUrl, String secret)
     {
-        // Minimal payload. You can add more fields if you want.
         final String payload = "{\"secret\":\"" + escapeJson(secret) + "\"}";
 
-        RequestBody body = RequestBody.create(payload, JSON);
-        Request req = new Request.Builder()
-                .url(webAppUrl)
-                .post(body)
-                .build();
-
-        try (Response res = http.newCall(req).execute())
+        try
         {
-            if (!res.isSuccessful())
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(webAppUrl))
+                    .timeout(Duration.ofSeconds(20))
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build();
+
+            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+
+            if (res.statusCode() < 200 || res.statusCode() >= 300)
             {
-                log.warn("Apps Script call failed: HTTP {} {}", res.code(), res.message());
-                notifier.notify("WOM→Sheets Bridge: Sheets trigger failed (HTTP " + res.code() + ").");
+                log.warn("Apps Script call failed: HTTP {} body={}", res.statusCode(), res.body());
+                notifier.notify("WOM→Sheets Bridge: Sheets trigger failed (HTTP " + res.statusCode() + ").");
                 return;
             }
 
             notifier.notify("WOM→Sheets Bridge: Sheets script triggered.");
         }
-        catch (IOException ex)
+        catch (Exception ex)
         {
             log.warn("Apps Script call error", ex);
             notifier.notify("WOM→Sheets Bridge: error calling Sheets endpoint.");
@@ -116,7 +110,6 @@ public class WomSheetsBridgePlugin extends Plugin
 
     private static String escapeJson(String s)
     {
-        // Simple safe escaping for quotes/backslashes in the secret
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }
