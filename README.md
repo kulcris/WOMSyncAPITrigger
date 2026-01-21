@@ -1,10 +1,10 @@
 # WOM Sync URL Trigger
 
-A helper plugin that triggers a google sheets script to run when WOM data is synced from the clan
+A helper plugin that triggers a google sheets script to run when WOM data is synced from the clan settings
 
 ## Features
 
-- Listins to the chat for the wise old man sync complete message.
+- Listens to the chat for the wise old man sync complete message.
 - Triggers the configured script to run
 
 
