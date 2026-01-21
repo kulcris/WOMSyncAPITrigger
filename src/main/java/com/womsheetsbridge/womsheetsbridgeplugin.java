@@ -15,12 +15,15 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.util.Text;
 
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -44,6 +47,7 @@ public class womsheetsbridgeplugin extends Plugin
     // Injected by RuneLite; do not construct your own OkHttpClient/Builder
     @Inject private OkHttpClient okHttpClient;
 
+    // Kept, but no longer used for HTTP (enqueue is async). Safe to remove later if you want.
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private volatile boolean syncPending = false;
@@ -88,7 +92,6 @@ public class womsheetsbridgeplugin extends Plugin
     }
 
     @Subscribe
-
     public void onChatMessage(ChatMessage event)
     {
         if (!config.enabled() || !syncPending)
@@ -167,7 +170,6 @@ public class womsheetsbridgeplugin extends Plugin
         }
 
         final String webAppUrl = config.webAppUrl();
-
         if (webAppUrl == null || webAppUrl.isBlank())
         {
             notifier.notify("WOM → Sheets Bridge: Configure Web App URL.");
@@ -180,13 +182,13 @@ public class womsheetsbridgeplugin extends Plugin
         syncPendingUntilMs = 0L;
         lastTriggerAtMs = now;
 
-        executor.submit(() -> triggerAppsScript(webAppUrl));
+        // enqueue() is async already; no executor needed here.
+        triggerAppsScript(webAppUrl);
     }
-
 
     private static boolean looksLikeWomSyncSuccess(String message)
     {
-        // Exact completion line you observed:
+        // Example completion line:
         // "WOM: Synced 494 clan members. 0 added, 0 removed, 0 ranks changed, 0 ranks ignored."
         final String lower = message.trim().toLowerCase();
         return lower.startsWith("wom:")
@@ -208,6 +210,7 @@ public class womsheetsbridgeplugin extends Plugin
 
         try
         {
+            // OkHttp 4+ prefers (String, MediaType). If your OkHttp is older, swap arg order.
             final RequestBody body = RequestBody.create(JSON, payload);
 
             final Request request = new Request.Builder()
@@ -217,35 +220,50 @@ public class womsheetsbridgeplugin extends Plugin
 
             if (config.debug())
             {
-                log.info("[WOMSheetsBridge] HTTP POST -> {}", webAppUrl);
+                log.info("[WOMSheetsBridge] HTTP POST (enqueue) -> {}", webAppUrl);
             }
 
-            try (Response response = okHttpClient.newCall(request).execute())
+            okHttpClient.newCall(request).enqueue(new Callback()
             {
-                final int code = response.code();
-                final String responseBody = response.body() != null ? response.body().string() : "";
-
-                if (config.debug())
+                @Override
+                public void onFailure(Call call, IOException e)
                 {
-                    log.info("[WOMSheetsBridge] HTTP <- {} body={}", code, responseBody);
+                    log.warn("[WOMSheetsBridge] Error calling Sheets endpoint", e);
+                    notifier.notify("WOM → Sheets Bridge: Error calling Sheets endpoint.");
                 }
 
-                if (code < 200 || code >= 300)
+                @Override
+                public void onResponse(Call call, Response response) throws IOException
                 {
-                    notifier.notify("WOM → Sheets Bridge: Trigger failed (HTTP " + code + ")");
-                    return;
-                }
+                    try (Response r = response)
+                    {
+                        final int code = r.code();
+                        final String responseBody = r.body() != null ? r.body().string() : "";
 
-                notifier.notify("WOM → Sheets Bridge: Sheets script triggered.");
-            }
+                        if (config.debug())
+                        {
+                            log.info("[WOMSheetsBridge] HTTP <- {} body={}", code, responseBody);
+                        }
+
+                        if (code < 200 || code >= 300)
+                        {
+                            notifier.notify("WOM → Sheets Bridge: Trigger failed (HTTP " + code + ")");
+                            return;
+                        }
+
+                        notifier.notify("WOM → Sheets Bridge: Sheets script triggered.");
+                    }
+                }
+            });
         }
         catch (Exception e)
         {
-            log.warn("[WOMSheetsBridge] Error calling Sheets endpoint", e);
+            log.warn("[WOMSheetsBridge] Error building/requesting Sheets endpoint", e);
             notifier.notify("WOM → Sheets Bridge: Error calling Sheets endpoint.");
         }
     }
 
+    // Unused currently, but kept since it was in your file
     private static String escapeJson(String s)
     {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
