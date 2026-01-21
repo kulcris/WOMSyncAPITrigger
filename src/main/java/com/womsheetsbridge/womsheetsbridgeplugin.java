@@ -30,7 +30,7 @@ import java.util.concurrent.Executors;
         description = "Triggers a Google Sheets Apps Script after the Wise Old Man 'Sync WOM Group' completes.",
         tags = {"wom", "wise old man", "google sheets", "apps script"}
 )
-public class WomSheetsBridgePlugin extends Plugin
+public class womsheetsbridgeplugin extends Plugin
 {
     private static final String SYNC_OPTION_TEXT = "Sync WOM Group";
     private static final long PENDING_WINDOW_MS = 120_000; // 2 minutes
@@ -38,7 +38,7 @@ public class WomSheetsBridgePlugin extends Plugin
 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
-    @Inject private WomSheetsBridgeConfig config;
+    @Inject private womsheetsbridgeconfig config;
     @Inject private Notifier notifier;
 
     // Injected by RuneLite; do not construct your own OkHttpClient/Builder
@@ -51,9 +51,9 @@ public class WomSheetsBridgePlugin extends Plugin
     private volatile long lastTriggerAtMs = 0L;
 
     @Provides
-    WomSheetsBridgeConfig provideConfig(ConfigManager configManager)
+    womsheetsbridgeconfig provideConfig(ConfigManager configManager)
     {
-        return configManager.getConfig(WomSheetsBridgeConfig.class);
+        return configManager.getConfig(womsheetsbridgeconfig.class);
     }
 
     @Override

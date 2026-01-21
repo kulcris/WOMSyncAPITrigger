@@ -5,7 +5,7 @@ import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 
 @ConfigGroup("womsheetsbridge")
-public interface WomSheetsBridgeConfig extends Config
+public interface womsheetsbridgeconfig extends Config
 {
     @ConfigItem(
             keyName = "webAppUrl",
