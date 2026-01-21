@@ -2,42 +2,53 @@ package com.womsheetsbridge;
 
 import com.google.inject.Provides;
 import javax.inject.Inject;
+
 import lombok.extern.slf4j.Slf4j;
 
+import net.runelite.api.ChatMessageType;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.client.Notifier;
+import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
-import net.runelite.client.config.ConfigManager;
-import net.runelite.client.Notifier;
+import net.runelite.client.util.Text;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @Slf4j
 @PluginDescriptor(
         name = "WOM → Sheets Bridge",
-        description = "Triggers a Google Sheets Apps Script when the 'Sync WOM Group' button is pressed.",
-        tags = {"wise old man", "wom", "google sheets", "apps script"}
+        description = "Triggers a Google Sheets Apps Script after the Wise Old Man 'Sync WOM Group' completes.",
+        tags = {"wom", "wise old man", "google sheets", "apps script"}
 )
 public class WomSheetsBridgePlugin extends Plugin
 {
     private static final String SYNC_OPTION_TEXT = "Sync WOM Group";
+    private static final long PENDING_WINDOW_MS = 120_000; // 2 minutes
+    private static final long DEBOUNCE_MS = 10_000;
+
+    private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
     @Inject private WomSheetsBridgeConfig config;
     @Inject private Notifier notifier;
 
+    // Injected by RuneLite; do not construct your own OkHttpClient/Builder
+    @Inject private OkHttpClient okHttpClient;
+
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
+
+    private volatile boolean syncPending = false;
+    private volatile long syncPendingUntilMs = 0L;
+    private volatile long lastTriggerAtMs = 0L;
 
     @Provides
     WomSheetsBridgeConfig provideConfig(ConfigManager configManager)
@@ -49,6 +60,8 @@ public class WomSheetsBridgePlugin extends Plugin
     protected void shutDown()
     {
         executor.shutdownNow();
+        syncPending = false;
+        syncPendingUntilMs = 0L;
     }
 
     @Subscribe
@@ -65,46 +78,171 @@ public class WomSheetsBridgePlugin extends Plugin
             return;
         }
 
-        final String url = config.webAppUrl();
-        final String secret = config.sharedSecret();
+        syncPending = true;
+        syncPendingUntilMs = System.currentTimeMillis() + PENDING_WINDOW_MS;
 
-        if (url == null || url.isBlank() || secret == null || secret.isBlank())
+        if (config.debug())
         {
-            notifier.notify("WOM→Sheets Bridge: configure Web App URL + secret first.");
+            log.info("[WOMSheetsBridge] Armed pending window for {}ms", PENDING_WINDOW_MS);
+        }
+    }
+
+    @Subscribe
+
+    public void onChatMessage(ChatMessage event)
+    {
+        if (!config.enabled() || !syncPending)
+        {
             return;
         }
 
-        executor.submit(() -> triggerAppsScript(url, secret));
+        final long now = System.currentTimeMillis();
+        if (now > syncPendingUntilMs)
+        {
+            syncPending = false;
+            syncPendingUntilMs = 0L;
+
+            if (config.debug())
+            {
+                log.info("[WOMSheetsBridge] Pending window expired; disarmed");
+            }
+            return;
+        }
+
+        final ChatMessageType type = event.getType();
+        if (type != ChatMessageType.GAMEMESSAGE
+                && type != ChatMessageType.CONSOLE
+                && type != ChatMessageType.ENGINE
+                && type != ChatMessageType.MESBOX)
+        {
+            return;
+        }
+
+        final String raw = event.getMessage();
+        final String msg = raw == null ? "" : Text.removeTags(raw).trim();
+        if (msg.isEmpty())
+        {
+            return;
+        }
+
+        if (config.debug() && msg.toLowerCase().startsWith("wom:"))
+        {
+            log.info("[WOMSheetsBridge] pending chat: type={} msg={}", type, msg);
+        }
+
+        // Check success match explicitly and log it
+        final boolean success = looksLikeWomSyncSuccess(msg);
+        final boolean failure = looksLikeWomSyncFailure(msg);
+
+        if (config.debug() && msg.toLowerCase().startsWith("wom:"))
+        {
+            log.info("[WOMSheetsBridge] match check: success={} failure={}", success, failure);
+        }
+
+        if (failure)
+        {
+            syncPending = false;
+            syncPendingUntilMs = 0L;
+
+            if (config.debug())
+            {
+                log.info("[WOMSheetsBridge] Detected WOM failure; disarmed. msg={}", msg);
+            }
+            return;
+        }
+
+        if (!success)
+        {
+            return;
+        }
+
+        // Debounce
+        if (now - lastTriggerAtMs < DEBOUNCE_MS)
+        {
+            if (config.debug())
+            {
+                log.info("[WOMSheetsBridge] Debounced success message ({}ms since last trigger)", now - lastTriggerAtMs);
+            }
+            return;
+        }
+
+        final String webAppUrl = config.webAppUrl();
+
+        if (webAppUrl == null || webAppUrl.isBlank())
+        {
+            notifier.notify("WOM → Sheets Bridge: Configure Web App URL.");
+            syncPending = false;
+            syncPendingUntilMs = 0L;
+            return;
+        }
+
+        syncPending = false;
+        syncPendingUntilMs = 0L;
+        lastTriggerAtMs = now;
+
+        executor.submit(() -> triggerAppsScript(webAppUrl));
     }
 
-    private void triggerAppsScript(String webAppUrl, String secret)
+
+    private static boolean looksLikeWomSyncSuccess(String message)
     {
-        final String payload = "{\"secret\":\"" + escapeJson(secret) + "\"}";
+        // Exact completion line you observed:
+        // "WOM: Synced 494 clan members. 0 added, 0 removed, 0 ranks changed, 0 ranks ignored."
+        final String lower = message.trim().toLowerCase();
+        return lower.startsWith("wom:")
+                && lower.contains("synced")
+                && lower.contains("clan members");
+    }
+
+    private static boolean looksLikeWomSyncFailure(String message)
+    {
+        final String lower = message.trim().toLowerCase();
+        return lower.startsWith("wom:")
+                && (lower.contains("failed") || lower.contains("error"));
+    }
+
+    private void triggerAppsScript(String webAppUrl)
+    {
+        // no secret, minimal payload
+        final String payload = "{}";
 
         try
         {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(webAppUrl))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Content-Type", "application/json; charset=utf-8")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+            final RequestBody body = RequestBody.create(JSON, payload);
+
+            final Request request = new Request.Builder()
+                    .url(webAppUrl)
+                    .post(body)
                     .build();
 
-            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-
-            if (res.statusCode() < 200 || res.statusCode() >= 300)
+            if (config.debug())
             {
-                log.warn("Apps Script call failed: HTTP {} body={}", res.statusCode(), res.body());
-                notifier.notify("WOM→Sheets Bridge: Sheets trigger failed (HTTP " + res.statusCode() + ").");
-                return;
+                log.info("[WOMSheetsBridge] HTTP POST -> {}", webAppUrl);
             }
 
-            notifier.notify("WOM→Sheets Bridge: Sheets script triggered.");
+            try (Response response = okHttpClient.newCall(request).execute())
+            {
+                final int code = response.code();
+                final String responseBody = response.body() != null ? response.body().string() : "";
+
+                if (config.debug())
+                {
+                    log.info("[WOMSheetsBridge] HTTP <- {} body={}", code, responseBody);
+                }
+
+                if (code < 200 || code >= 300)
+                {
+                    notifier.notify("WOM → Sheets Bridge: Trigger failed (HTTP " + code + ")");
+                    return;
+                }
+
+                notifier.notify("WOM → Sheets Bridge: Sheets script triggered.");
+            }
         }
-        catch (Exception ex)
+        catch (Exception e)
         {
-            log.warn("Apps Script call error", ex);
-            notifier.notify("WOM→Sheets Bridge: error calling Sheets endpoint.");
+            log.warn("[WOMSheetsBridge] Error calling Sheets endpoint", e);
+            notifier.notify("WOM → Sheets Bridge: Error calling Sheets endpoint.");
         }
     }
 

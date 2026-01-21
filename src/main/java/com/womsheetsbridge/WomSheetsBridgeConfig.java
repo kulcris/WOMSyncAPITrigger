@@ -18,16 +18,6 @@ public interface WomSheetsBridgeConfig extends Config
     }
 
     @ConfigItem(
-            keyName = "sharedSecret",
-            name = "Shared secret",
-            description = "Must match SHARED_SECRET in your Apps Script."
-    )
-    default String sharedSecret()
-    {
-        return "";
-    }
-
-    @ConfigItem(
             keyName = "enabled",
             name = "Enable bridge",
             description = "If disabled, no requests are sent."
@@ -35,5 +25,14 @@ public interface WomSheetsBridgeConfig extends Config
     default boolean enabled()
     {
         return true;
+    }
+    @ConfigItem(
+            keyName = "debug",
+            name = "Debug logging",
+            description = "Logs chat lines during pending WOM sync window and HTTP responses."
+    )
+    default boolean debug()
+    {
+        return false;
     }
 }
