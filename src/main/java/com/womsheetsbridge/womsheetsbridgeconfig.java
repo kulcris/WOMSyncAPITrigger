@@ -10,7 +10,8 @@ public interface womsheetsbridgeconfig extends Config
     @ConfigItem(
             keyName = "webAppUrl",
             name = "Apps Script Web App URL",
-            description = "The Apps Script Web App deployment URL (the /exec link)."
+            description = "The Apps Script Web App deployment URL (the /exec link).",
+            warning = "This plugin submits your IP address to a 3rd party website not controlled or verified by the RuneLite Developers."
     )
     default String webAppUrl()
     {
